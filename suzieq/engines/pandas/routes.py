@@ -1,7 +1,7 @@
+from collections import defaultdict
 from suzieq.engines.pandas.engineobj import SqEngineObject
-# this is needed for calling .astype('ipnetwork')
-from cyberpandas import IPNetworkType
 import pandas as pd
+from ipaddress import ip_address, ip_network
 
 
 class RoutesObj(SqEngineObject):
@@ -9,15 +9,29 @@ class RoutesObj(SqEngineObject):
     def get(self, **kwargs):
 
         prefixlen = kwargs.pop('prefixlen', None)
+        columns = kwargs.get('columns', ['default'])
         df = super().get(**kwargs)
         if not df.empty and 'prefix' in df.columns:
             df = df.loc[df['prefix'] != "127.0.0.0/8"]
             df['prefix'].replace('default', '0.0.0.0/0', inplace=True)
-            df['prefix'] = df['prefix'].astype('ipnetwork')
+
+            if prefixlen or ('prefixlen' in columns or columns == ['*']):
+                df['prefixlen'] = df['prefix'].str.split(
+                    '/').str[1].astype('int')
 
             if prefixlen:
-                df = df.query(f'prefix.ipnet.prefixlen {prefixlen}')
+                if any(map(prefixlen.startswith, ['<', '>'])):
+                    query_str = f'prefixlen {prefixlen}'
+                elif prefixlen.startswith('!'):
+                    query_str = f'prefixlen != {prefixlen[1:]}'
+                else:
+                    query_str = f'prefixlen == {prefixlen}'
 
+                # drop in reset_index to not add an additional index col
+                df = df.query(query_str).reset_index(drop=True)
+
+            if columns != ['*'] and 'prefixlen' not in columns:
+                df.drop(columns=['prefixlen'], inplace=True, errors='ignore')
         return df
 
     def summarize(self, **kwargs):
@@ -38,9 +52,8 @@ class RoutesObj(SqEngineObject):
 
         self._summarize_on_add_with_query = [
             ('ifRoutesCnt',
-             'prefix.ipnet.prefixlen == 30 or prefix.ipnet.prefixlen == 31',
-             'prefix'),
-            ('hostRoutesCnt', 'prefix.ipnet.prefixlen == 32', 'prefix'),
+             'prefixlen == 30 or prefixlen == 31', 'prefix'),
+            ('hostRoutesCnt', 'prefixlen == 32', 'prefix'),
             ('totalV4RoutesinNs', 'ipvers == 4', 'prefix'),
             ('totalV6RoutesinNs', 'ipvers == 6', 'prefix'),
         ]
@@ -58,7 +71,7 @@ class RoutesObj(SqEngineObject):
         self.summary_row_order.append('routesperVrfStat')
 
         device_with_defrt_per_vrfns = self.summary_df \
-            .query("prefix.ipnet.is_default") \
+            .query('prefix == "0.0.0.0/0"') \
             .groupby(by=["namespace", "vrf"])[
                 "hostname"].nunique()
         devices_per_vrfns = self.summary_df.groupby(by=["namespace", "vrf"])[
@@ -77,35 +90,71 @@ class RoutesObj(SqEngineObject):
         if not self.iobj._table:
             raise NotImplementedError
 
-        ipaddr = kwargs.get('address')
-        del kwargs['address']
+        addr = kwargs.pop('address')
+        kwargs.pop('ipvers', None)
+        df = kwargs.pop('cached_df', pd.DataFrame())
 
-        cols = kwargs.get("columns", ["namespace", "hostname", "vrf",
-                                      "prefix", "nexthopIps", "oifs",
-                                      "protocol", "ipvers"])
+        try:
+            ipaddr = ip_address(addr)
+            ipvers = ipaddr._version
+        except ValueError as e:
+            raise ValueError(e)
+
+        cols = kwargs.pop("columns", ["namespace", "hostname", "vrf",
+                                      "prefix", "prefixlen", "nexthopIps",
+                                      "oifs", "protocol", "ipvers"])
 
         if cols != ['default']:
             if 'prefix' not in cols:
                 cols.insert(-1, 'prefix')
             if 'ipvers' not in cols:
                 cols.insert(-1, 'ipvers')
+            if 'prefixlen' not in cols:
+                cols.insert(-1, 'prefixlen')
 
-        df = self.get(**kwargs)
+        rslt = pd.DataFrame()
+
+        if df.empty:
+            df = self.get(ipvers=str(ipvers), columns=cols, **kwargs)
 
         if df.empty:
             return df
 
-        idx = df[['namespace', 'hostname', 'vrf', 'prefix']] \
-            .query("prefix.ipnet.supernet_of('{}')".format(ipaddr)) \
-            .groupby(by=['namespace', 'hostname', 'vrf'])['prefix'] \
-            .max() \
-            .dropna() \
-            .reset_index()
+        if 'prefixlen' not in df.columns and 'prefix' in df.columns:
+            df['prefixlen'] = df['prefix'].str.split('/').str[1].astype('int')
 
-        if idx.empty:
-            return pd.DataFrame(columns=cols)
+        # Vectorized operation for faster results with IPv4:
+        if ipvers == 4:
+            intaddr = df.prefix.str.split('/').str[0] \
+                        .map(lambda y: int(''.join(['%02x' % int(x)
+                                                    for x in y.split('.')]),
+                                           16))
+            netmask = df.prefixlen \
+                        .map(lambda x: (0xffffffff << (32 - x)) & 0xffffffff)
+            match = (ipaddr._ip & netmask) == (intaddr & netmask)
+            rslt = df.loc[match.loc[match].index] \
+                     .sort_values('prefixlen', ascending=False) \
+                     .drop_duplicates(['namespace', 'hostname', 'vrf'])
+        else:
+            selected_entries = {}
+            max_plens = defaultdict(int)
+            for row in df.itertuples():
+                rtentry = ip_network(row.prefix)
+                if ipaddr in rtentry:
+                    key = f'{row.namespace}-{row.hostname}-{row.vrf}'
+                    if rtentry.prefixlen > max_plens[key]:
+                        max_plens[key] = rtentry.prefixlen
+                        selected_entries[key] = row
+            if selected_entries:
+                rslt = pd.DataFrame(list(selected_entries.values())) \
+                         .drop(columns=['Index'], errors='ignore')
+            else:
+                rslt = pd.DataFrame()
 
-        return idx.merge(df)
+        if 'prefixlen' not in cols:
+            return rslt.drop(columns=['prefixlen'], errors='ignore')
+        else:
+            return rslt
 
     def aver(self, **kwargs) -> pd.DataFrame:
         """Verify that the routing table is consistent
@@ -135,8 +184,7 @@ class RoutesObj(SqEngineObject):
 
         type = kwargs.pop('type', 'entry')
 
-        df = self.get_valid_df(self.iobj._table, self.iobj._sort_fields,
-                               columns=getcols, **kwargs)
+        df = self.get_valid_df(self.iobj._table, columns=getcols, **kwargs)
         if df.empty:
             return df
 

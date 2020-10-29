@@ -25,13 +25,8 @@ class AddressObj(SqEngineObject):
         columns = kwargs.get("columns", [])
         ipvers = kwargs.pop("ipvers", "")
         vrf = kwargs.pop("vrf", "")
-        addnl_fields = ['origIfname', 'master']
+        addnl_fields = ['master']
         drop_cols = []
-
-        if self.ctxt.sort_fields is None:
-            sort_fields = None
-        else:
-            sort_fields = self.sort_fields
 
         v4addr = []
         v6addr = []
@@ -67,17 +62,14 @@ class AddressObj(SqEngineObject):
                     a += '/'
                 v6addr.append(a)
 
-        df = self.get_valid_df("address", sort_fields, master=vrf,
+        df = self.get_valid_df("address", master=vrf,
                                addnl_fields=addnl_fields, **kwargs)
 
         if df.empty:
             return df
 
-        df['ifname'] = df['origIfname']
         if not vrf and not any(i in columns for i in ["master", "vrf"]):
-            df.drop(columns=['origIfname', 'master'], inplace=True)
-        else:
-            df.drop(columns=['origIfname'], inplace=True)
+            df.drop(columns=['master'], inplace=True)
 
         if 4 in addr_types:
             df = df.explode('ipAddressList').fillna({'ipAddressList': ''})

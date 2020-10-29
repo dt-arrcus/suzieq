@@ -4,11 +4,13 @@
     "type": "record",
     "fields": [
         {
-            "name": "instance",
-            "type": "string"
-        },
+	    "name": "sqvers",
+	    "type": "string",
+	    "partition": 0,
+	    "default": "1.0"
+	},
         {
-            "name": "origIfname",
+            "name": "instance",
             "type": "string"
         },
         {
@@ -103,13 +105,15 @@
             "name": "hostname",
             "type": "string",
             "key": 1,
-            "display": 1
+            "display": 1,
+	    "partition": 2
         },
         {
             "name": "namespace",
             "type": "string",
             "key": 0,
-            "display": 0
+            "display": 0,
+	    "partition": 1
         },
         {
             "name": "timestamp",

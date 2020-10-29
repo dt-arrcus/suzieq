@@ -28,14 +28,39 @@ class SqEngineObject(object):
     def table(self):
         return self.iobj._table
 
-    @property
-    def sort_fields(self):
-        return self.iobj._sort_fields
-
-    def get_valid_df(self, table, sort_fields, **kwargs) -> pd.DataFrame:
+    def get_valid_df(self, table, **kwargs) -> pd.DataFrame:
         if not self.ctxt.engine:
             print("Specify an analysis engine using set engine command")
             return pd.DataFrame(columns=["namespace", "hostname"])
+
+        sch = SchemaForTable(table, schema=self.schemas)
+        phy_table = sch.get_phy_table_for_table()
+
+        columns = kwargs.pop('columns', ['default'])
+        addnl_fields = kwargs.pop('addnl_fields', [])
+        view = kwargs.pop('view', self.iobj.view)
+        active_only = kwargs.pop('active_only', True)
+
+        fields = sch.get_display_fields(columns)
+        key_fields = sch.key_fields()
+        drop_cols = []
+
+        if 'timestamp' not in fields:
+            fields.append('timestamp')
+
+        if 'active' not in fields+addnl_fields:
+            addnl_fields.append('active')
+            drop_cols.append('active')
+
+        for fld in key_fields:
+            if fld not in fields+addnl_fields:
+                addnl_fields.insert(0, fld)
+                drop_cols.append(fld)
+
+        for f in addnl_fields:
+            if f not in fields:
+                # timestamp is always the last field
+                fields.insert(-1, f)
 
         for dt in [self.iobj.start_time, self.iobj.end_time]:
             if dt:
@@ -47,40 +72,44 @@ class SqEngineObject(object):
 
         table_df = self.ctxt.engine.get_table_df(
             self.cfg,
-            self.schemas,
-            table=table,
-            view=self.iobj.view,
+            table=phy_table,
             start_time=self.iobj.start_time,
             end_time=self.iobj.end_time,
-            sort_fields=sort_fields,
+            columns=fields,
+            view=view,
+            key_fields=key_fields,
             **kwargs
         )
+
+        if not table_df.empty:
+            if view == 'latest' and active_only:
+                table_df = table_df.query('active') \
+                                   .drop(columns=drop_cols)
+            else:
+                table_df.drop(columns=drop_cols, inplace=True)
+            if 'timestamp' in table_df.columns:
+                table_df['timestamp'] = pd.to_datetime(
+                    table_df.timestamp.astype(str), unit="ms")
 
         return table_df
 
     def get(self, **kwargs):
-        if not self.iobj._table:
+        if not self.iobj.table:
             raise NotImplementedError
 
-        if self.ctxt.sort_fields is None:
-            sort_fields = None
-        else:
-            sort_fields = self.iobj._sort_fields
-
         try:
-            df = self.get_valid_df(self.iobj._table, sort_fields, **kwargs)
+            df = self.get_valid_df(self.iobj.table, **kwargs)
         except pa.lib.ArrowInvalid:
             return pd.DataFrame(columns=['namespace', 'hostname'])
 
         return df
 
     def get_table_info(self, table, **kwargs):
-        sch = SchemaForTable(table, schema=self.schemas)
-        key_fields = sch.key_fields()
         # You can't use view from user because we need to see all the data
         # to compute data required.
         kwargs.pop('view', None)
-        all_time_df = self._get_table_info(table, view='all', **kwargs)
+
+        all_time_df = self.get_valid_df(table, view='all', **kwargs)
         times = all_time_df['timestamp'].unique()
         ret = {'first_time': all_time_df.timestamp.min(),
                'latest_time': all_time_df.timestamp.max(),
@@ -97,25 +126,16 @@ class SqEngineObject(object):
         else:
             return 0
 
-    def _get_table_info(self, table, view='latest', **kwargs):
-        df = self.ctxt.engine.get_table_df(
-            self.cfg,
-            self.schemas,
-            table=table,
-            view=view,
-            start_time='',
-            end_time='',
-            sort_fields=None,
-            **kwargs
-        )
-        return df
-
     def summarize(self, **kwargs):
-        """There is a pattern of how to do these
-        use self._init_summarize(),
-            creates self.summary_df, which is the initial pandas dataframe based on the table
-            creates self.nsgrp of data grouped by namespace
-            self.ns is the dict to add data to which will be turned into a dataframe and then returned
+        """Summarize the info about this resource/service.
+
+        There is a pattern of how to do these
+        use self._init_summarize():
+           - creates self.summary_df, which is the initial pandas dataframe
+             based on the table
+           - creates self.nsgrp of data grouped by namespace
+           - self.ns is the dict to add data to which will be turned into a
+             dataframe and then returned
 
         if you want to simply take a field and run a pandas functon, then use
           self._add_field_to_summary
@@ -156,10 +176,14 @@ class SqEngineObject(object):
                 func = 'count'
             fld_df = self.summary_df.query(query_str)
             if not fld_df.empty:
-                fld_per_ns = fld_df.groupby(by=['namespace'])[field] \
-                                   .agg(func)
+                fld_per_ns = fld_df.groupby(by=['namespace'],
+                                            observed=True)[field] \
+                    .agg(func)
                 for i in self.ns.keys():
-                    self.ns[i].update({field_name: fld_per_ns[i]})
+                    if i in fld_per_ns:
+                        self.ns[i].update({field_name: fld_per_ns[i]})
+                    else:
+                        self.ns[i].update({field_name: 0})
             else:
                 for i in self.ns.keys():
                     self.ns[i].update({field_name: 0})
@@ -173,9 +197,11 @@ class SqEngineObject(object):
         for field_name, query_str, field in self._summarize_on_add_stat:
             if query_str:
                 statfld = self.summary_df.query(query_str) \
-                                         .groupby(by=['namespace'])[field]
+                    .groupby(by=['namespace'],
+                             observed=True)[field]
             else:
-                statfld = self.summary_df.groupby(by=['namespace'])[field]
+                statfld = self.summary_df.groupby(
+                    by=['namespace'], observed=True)[field]
 
             self._add_stats_to_summary(statfld, field_name)
             self.summary_row_order.append(field_name)
@@ -184,13 +210,13 @@ class SqEngineObject(object):
                 self._summarize_on_perdevice_stat:
             if query_str:
                 statfld = self.summary_df \
-                              .query(query_str) \
-                              .groupby(by=['namespace', 'hostname'])[field] \
-                              .agg(func)
+                    .query(query_str) \
+                    .groupby(by=['namespace', 'hostname'], observed=True)[field] \
+                    .agg(func)
             else:
                 statfld = self.summary_df \
-                              .groupby(by=['namespace', 'hostname'])[field] \
-                              .agg(func)
+                    .groupby(by=['namespace', 'hostname'], observed=True)[field] \
+                    .agg(func)
 
             self._add_stats_to_summary(statfld, field_name, filter_by_ns=True)
             self.summary_row_order.append(field_name)
@@ -225,22 +251,27 @@ class SqEngineObject(object):
 
         if groupby:
             if type == 'host' and 'hostname' not in groupby:
-                grp = df.groupby(by=groupby.split() + ['hostname', column])
+                grp = df.groupby(by=groupby.split() +
+                                 ['hostname', column], observed=True)
                 grpkeys = list(grp.groups.keys())
                 gdict = {}
                 for i, g in enumerate(groupby.split() + ['hostname', column]):
                     gdict[g] = [x[i] for x in grpkeys]
-                r = pd.DataFrame(gdict).groupby(by=groupby.split())[column] \
+                r = pd.DataFrame(gdict).groupby(by=groupby.split(),
+                                                observed=True)[column] \
                     .value_counts()
                 return (pd.DataFrame({'count': r})
                           .reset_index())
 
             else:
-                r = df.groupby(by=groupby.split())[column].value_counts()
+                r = df.groupby(by=groupby.split(), observed=True)[column] \
+                    .value_counts()
                 return pd.DataFrame({'count': r}).reset_index()
         else:
             if type == 'host' and column != 'hostname':
-                r = df.groupby('hostname').first()[column].value_counts()
+                r = df.groupby('hostname', observed=True) \
+                    .first()[column] \
+                    .value_counts()
             else:
                 r = df[column].value_counts()
 
@@ -293,7 +324,7 @@ class SqEngineObject(object):
             return df
 
         self.ns = {i: {} for i in df['namespace'].unique()}
-        self.nsgrp = df.groupby(by=["namespace"])
+        self.nsgrp = df.groupby(by=["namespace"], observed=True)
 
     def _post_summarize(self, check_empty_col='deviceCnt'):
         # this is needed in the case that there is a namespace that has no
@@ -348,15 +379,19 @@ class SqEngineObject(object):
             self.ns[n].update({field_name: value})
 
     def _add_stats_to_summary(self, groupedby, fieldname, filter_by_ns=False):
-        """ takes the pandas groupby object and adds min, max, and median to self.ns"""
+        """Takes grouped stats and adds min, max, and median to stats"""
 
         {self.ns[i].update({fieldname: []}) for i in self.ns.keys()}
         if filter_by_ns:
             {self.ns[i][fieldname].append(groupedby[i].min())
+             if i in groupedby else self.ns[i][fieldname].append(0)
              for i in self.ns.keys()}
             {self.ns[i][fieldname].append(groupedby[i].max())
+             if i in groupedby else self.ns[i][fieldname].append(0)
              for i in self.ns.keys()}
-            {self.ns[i][fieldname].append(groupedby[i].median(numeric_only=False))
+            {self.ns[i][fieldname].append(
+                groupedby[i].median(numeric_only=False))
+             if i in groupedby else self.ns[i][fieldname].append(0)
              for i in self.ns.keys()}
         else:
             min_field = groupedby.min()
@@ -364,8 +399,11 @@ class SqEngineObject(object):
             med_field = groupedby.median(numeric_only=False)
 
             {self.ns[i][fieldname].append(min_field[i])
+             if i in min_field else self.ns[i][fieldname].append(0)
              for i in self.ns.keys()}
             {self.ns[i][fieldname].append(max_field[i])
+             if i in max_field else self.ns[i][fieldname].append(0)
              for i in self.ns.keys()}
             {self.ns[i][fieldname].append(med_field[i])
+             if i in med_field else self.ns[i][fieldname].append(0)
              for i in self.ns.keys()}

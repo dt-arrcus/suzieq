@@ -1,12 +1,9 @@
 from ipaddress import IPv4Network
 import pandas as pd
-from datetime import datetime
 
-from suzieq.exceptions import NoLLdpError
-from suzieq.utils import SchemaForTable
 from suzieq.sqobjects.lldp import LldpObj
-from suzieq.sqobjects.interfaces import IfObj
 from suzieq.engines.pandas.engineobj import SqEngineObject
+from suzieq.utils import SchemaForTable, build_query_str
 
 
 class OspfObj(SqEngineObject):
@@ -14,15 +11,35 @@ class OspfObj(SqEngineObject):
     def _get_combined_df(self, **kwargs):
         """OSPF has info divided across multiple tables. Get a single one"""
 
-        if self.ctxt.sort_fields is None:
-            sort_fields = None
-        else:
-            sort_fields = self.sort_fields
-
-        columns = kwargs.get('columns', ['default'])
+        columns = kwargs.pop('columns', ['default'])
         state = kwargs.pop('state', '')
         addnl_fields = kwargs.pop('addnl_fields', self.iobj._addnl_fields)
         addnl_nbr_fields = self.iobj._addnl_nbr_fields
+
+        cols = SchemaForTable('ospf', schema=self.schemas) \
+            .get_display_fields(columns)
+        if columns == ['default']:
+            cols.append('timestamp')
+
+        ifschema = SchemaForTable('ospfIf', schema=self.schemas)
+        nbrschema = SchemaForTable('ospfNbr', schema=self.schemas)
+
+        if (columns != ['default']) and (columns != ['*']):
+            ifkeys = ifschema.key_fields()
+            nbrkeys = nbrschema.key_fields()
+            if_flds = ifschema.fields
+            nbr_flds = nbrschema.fields
+
+            ifcols = ifkeys
+            nbrcols = nbrkeys
+            for fld in columns:
+                if fld in if_flds and fld not in ifcols:
+                    ifcols.append(fld)
+                elif fld in nbr_flds and fld not in nbrcols:
+                    nbrcols.append(fld)
+        else:
+            ifcols = ifschema.get_display_fields(columns)
+            nbrcols = nbrschema.get_display_fields(columns)
 
         if state == "pass":
             query_str = 'adjState == "full" or adjState == "passive"'
@@ -31,23 +48,17 @@ class OspfObj(SqEngineObject):
         else:
             query_str = ''
 
-        df = self.get_valid_df('ospfIf', sort_fields,
-                               addnl_fields=addnl_fields, **kwargs)
-        nbr_df = self.get_valid_df('ospfNbr', sort_fields,
-                                   addnl_fields=addnl_nbr_fields, **kwargs)
+        df = self.get_valid_df('ospfIf', addnl_fields=addnl_fields,
+                               columns=ifcols, **kwargs)
+        nbr_df = self.get_valid_df('ospfNbr', addnl_fields=addnl_nbr_fields,
+                                   columns=nbrcols, **kwargs)
         if nbr_df.empty:
             return nbr_df
-        else:
-            nbr_df['ifname'] = nbr_df['origIfname']
-            nbr_df.drop(columns=['origIfname'], inplace=True)
 
-        if not df.empty:
-            df['ifname'] = df['origIfname']
-            df.drop(columns=['origIfname'], inplace=True)
-
+        merge_cols = [x for x in ['namespace', 'hostname', 'ifname']
+                      if x in nbr_df.columns]
         # Merge the two tables
-        df = df.merge(nbr_df, on=['namespace', 'hostname', 'ifname'],
-                      how='left')
+        df = df.merge(nbr_df, on=merge_cols, how='left')
 
         if columns == ['*']:
             df = df.drop(columns=['area_y', 'instance_y', 'vrf_y',
@@ -56,10 +67,12 @@ class OspfObj(SqEngineObject):
                     'instance_x': 'instance', 'areaStub_x': 'areaStub',
                     'area_x': 'area', 'vrf_x': 'vrf',
                     'state_x': 'ifState', 'state_y': 'adjState',
+                    'sqvers_x': 'sqvers', 'active_x': 'active',
                     'timestamp_x': 'timestamp'})
         else:
             df = df.rename(columns={'vrf_x': 'vrf', 'area_x': 'area',
-                                    'state_x': 'ifState', 'state_y': 'adjState',
+                                    'state_x': 'ifState',
+                                    'state_y': 'adjState',
                                     'timestamp_x': 'timestamp'})
             df = df.drop(list(df.filter(regex='_y$')), axis=1) \
                 .fillna({'peerIP': '-', 'numChanges': 0,
@@ -75,11 +88,8 @@ class OspfObj(SqEngineObject):
         df.bfill(axis=0, inplace=True)
 
         # Move the timestamp column to the end
-        cols = df.columns.to_list()
-        cols.remove('timestamp')
-        cols.append('timestamp')
         if query_str:
-            return df[cols].query(query_str)
+            return df.query(query_str)[cols]
         return df[cols]
 
     def get(self, **kwargs):
@@ -91,6 +101,7 @@ class OspfObj(SqEngineObject):
         # Discard these
         kwargs.pop('columns', None)
 
+        # 'ospfIf' is ignored
         self._init_summarize('ospfIf', **kwargs)
         if self.summary_df.empty:
             return self.summary_df
@@ -155,17 +166,15 @@ class OspfObj(SqEngineObject):
             "timestamp",
             "area",
             "nbrCount",
-            "origIfname",
         ]
-        sort_fields = ["namespace", "hostname", "ifname", "vrf"]
 
-        ospf_df = self.get_valid_df(
-            "ospfIf", sort_fields, columns=columns, **kwargs)
+        # we have to not filter hostname at this point because we need to
+        #   understand neighbor relationships
+        orig_hostname = kwargs.pop('hostname', '')
+
+        ospf_df = self.get_valid_df("ospfIf", columns=columns, **kwargs)
         if ospf_df.empty:
             return pd.DataFrame(columns=columns)
-
-        ospf_df['ifname'] = ospf_df['origIfname']
-        ospf_df.drop(columns=['origIfname'], inplace=True)
 
         ospf_df["assertReason"] = [[] for _ in range(len(ospf_df))]
         df = (
@@ -223,6 +232,12 @@ class OspfObj(SqEngineObject):
                                          on=["namespace", "hostname",
                                              "ifname"]) \
             .dropna(how="any")
+      
+        # filter by hostname now
+        if orig_hostname:
+            ospfschema = SchemaForTable('ospf', schema=self.schemas)
+            hq = build_query_str([], ospfschema, hostname=orig_hostname)
+            ospf_df = ospf_df.query(hq)
 
         if int_df.empty:
             # Weed out the loopback and SVI interfaces as they have no LLDP peers

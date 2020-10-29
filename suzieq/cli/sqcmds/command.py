@@ -105,11 +105,12 @@ class SqCommand:
         return self._schemas
 
     def _gen_output(self, df: pd.DataFrame, json_orient: str = "records",
-                    dont_strip_cols: bool = False):
+                    dont_strip_cols: bool = False, sort: bool = True):
         if df.columns.to_list() == ['error']:
             retcode = 1
             max_colwidth = None
             cols = df.columns
+            is_error = True
         else:
             max_colwidth = 50
             retcode = 0
@@ -117,6 +118,7 @@ class SqCommand:
                 cols = self.columns
             else:
                 cols = df.columns
+            is_error = False
 
         if dont_strip_cols or not all(item in df.columns for item in cols):
             cols = df.columns
@@ -133,9 +135,19 @@ class SqCommand:
         else:
             with pd.option_context('precision', 3,
                                    'display.max_colwidth', max_colwidth,
-                                   'display.max_rows', max(df.shape[0]+1, 64)):
+                                   'display.max_rows', 256):
                 if df.empty:
                     print(df)
+                elif sort:
+                    if is_error:
+                        print(df[cols])
+                    else:
+                        sort_fields = [x for x in self.sqobj._sort_fields
+                                       if x in df.columns and x in cols]
+                        if sort_fields:
+                            print(df[cols].sort_values(by=sort_fields))
+                        else:
+                            print(df[cols])
                 else:
                     print(df[cols])
 
@@ -174,10 +186,10 @@ class SqCommand:
     def top(self, **kwargs):
         raise NotImplementedError
 
-    @ command("unique", help="find the list of unique items in a column")
-    @ argument("groupby", description="List of columns to group by")
-    @ argument("type", description="Unique per host or table entry",
-               choices=['entry', 'host'])
+    @command("unique", help="find the list of unique items in a column")
+    @argument("groupby", description="List of columns to group by")
+    @argument("type", description="Unique per host or table entry",
+              choices=['entry', 'host'])
     def unique(self, groupby='', type='entry', **kwargs):
         now = time.time()
         try:

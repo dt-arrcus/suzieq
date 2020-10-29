@@ -2,15 +2,11 @@ import pytest
 from suzieq.cli.sqcmds import *
 from nubia import context
 import os
-import shlex
-import sys
-from tests.conftest import commands, suzieq_cli_path, load_up_the_tests
+from tests.conftest import commands, load_up_the_tests, tables
 from tempfile import mkstemp
-import yaml
 import json
-from subprocess import check_output, CalledProcessError
-from collections import Counter
 from tests.conftest import setup_sqcmds
+import pandas as pd
 
 
 basic_verbs = ['show', 'summarize']
@@ -228,6 +224,12 @@ def test_context_start_time_filtering(setup_nubia, cmd):
     assert s == 0
 
 
+@pytest.mark.parametrize('table', tables)
+def test_table_describe(setup_nubia, table):
+    out = _test_command('TableCmd', 'describe', {"table": table})
+    assert out == 0
+
+
 def _test_context_filtering(cmd, filter):
     assert len(filter) == 1
     ctx = context.get_context()
@@ -246,7 +248,7 @@ def execute_cmd(cmd, verb, arg, filter=None):
     instance = getattr(module, cmd)
     if filter is None:
         filter = {}
-        #filter = {'format': 'dataframe'}
+        # filter = {'format': 'dataframe'}
     # else:
     #    filter['format'] = 'dataframe'
     instance = instance(**filter)
@@ -261,53 +263,35 @@ def execute_cmd(cmd, verb, arg, filter=None):
 def _test_sqcmds(testvar, context_config):
     output, error = setup_sqcmds(testvar, context_config)
 
-
-    jout = []
-#    out_df = pd.DataFrame()
     if output:
-
         try:
             jout = json.loads(output.decode('utf-8').strip())
-#            out_df = pd.read_json(output.decode('utf-8').strip())
         except json.JSONDecodeError:
             jout = output
 
     if 'output' in testvar:
-#        expected_df = pd.DataFrame()
-        try:
-            expected_jout = json.loads(testvar['output'].strip())
-#            expected_df = pd.read_json(testvar['output'].strip())
-        except json.JSONDecodeError:
-            expected_jout = testvar['output']
 
-        # # get rid of time columns to compare against
-        #
-        # if not out_df.empty and not expected_df.empty:
-        #     for col in ['timestamp', 'lastChangeTime', 'first_time']:
-        #         if col in out_df.columns:
-        #             out_df = out_df.drop(columns=[col])
-        #         if col in expected_df:
-        #             expected_df = expected_df.drop(columns=[col])
-        #     pd.testing.assert_frame_equal(out_df, expected_df)
-        #     jout = json.loads(out_df.to_json())
-        #     expected_jout = json.loads(expected_df.to_json())
-
-        assert (type(expected_jout) == type(jout))
-        if isinstance(jout, dict):
-            assert (Counter(expected_jout) == Counter(jout))
-            return
+        expected_df = pd.read_json(testvar['output'].strip())
         try:
-            expected_setlist = set(tuple(sorted(d.items())) for d in jout)
-            got_setlist = set(tuple(sorted(d.items())) for d in expected_jout)
-            assert (expected_setlist == got_setlist)
-        except TypeError:
-            # This is for commands that return lists in their outputs.
-            # This isn't robust, because it assumes that we get the output
-            # back in sorted order except that the keys within each entry
-            # are not sorted. If the outer sort is changed, this won't work
-            expected = [sorted(d.items()) for d in expected_jout]
-            got = [sorted(d.items()) for d in jout]
-            assert (expected == got)
+            got_df = pd.read_json(output.decode('utf8').strip())
+        except AttributeError:
+            if output:
+                got_df = pd.read_json(output)
+            else:
+                got_df = pd.DataFrame()
+        # expected_df.sort_values(by=expected_df.columns[:1].tolist()) \
+        #            .reset_index(drop=True)
+        # got_df = got_df.sort_values(by=got_df.columns[:1].tolist()) \
+        #                .reset_index(drop=True)
+        # assert(expected_df.shape == got_df.shape)
+        rslt_df = pd.merge(got_df.reset_index(drop=True),
+                           expected_df.reset_index(drop=True),
+                           left_index=True, right_index=True,
+                           indicator=True)
+        assert(got_df.shape == expected_df.shape)
+        if not got_df.empty:
+            assert(not rslt_df.empty and rslt_df.query(
+                '_merge != "both"').empty)
 
     elif not error and 'xfail' in testvar:
         # this was marked to fail, but it succeeded so we must return
@@ -319,42 +303,49 @@ def _test_sqcmds(testvar, context_config):
             assert True
     elif error and 'error' in testvar and 'error' in testvar['error']:
         try:
-            jerror = json.loads(error.decode('utf-8').strip())
+            got_df = pd.DataFrame(json.loads(error.decode('utf-8').strip()))
         except json.JSONDecodeError:
-            jerror = error.decode('utf-8').strip()
-        jterror = json.loads(testvar['error']['error'])
-        assert jerror == jterror
+            got_df = pd.DataFrame(error.decode('utf-8').strip())
+        expected_df = pd.DataFrame(json.loads(testvar['error']['error']))
+        rslt_df = pd.merge(got_df.reset_index(drop=True),
+                           expected_df.reset_index(drop=True),
+                           left_index=True, right_index=True, how='outer',
+                           indicator=True)
+        assert(got_df.shape == expected_df.shape)
+        if not got_df.empty:
+            assert(not rslt_df.empty and rslt_df.query(
+                '_merge != "both"').empty)
     else:
         raise Exception(f"either xfail or output requried {error}")
 
 
-@pytest.mark.smoke
-@pytest.mark.sqcmds
-@pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
-                        '/tests/integration/sqcmds/cumulus-samples')))
+@ pytest.mark.smoke
+@ pytest.mark.sqcmds
+@ pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
+                                                                  '/tests/integration/sqcmds/cumulus-samples')))
 def test_cumulus_sqcmds(testvar, create_context_config):
     _test_sqcmds(testvar, create_context_config)
 
 
-@pytest.mark.smoke
-@pytest.mark.sqcmds
-@pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
-                        '/tests/integration/sqcmds/nxos-samples')))
+@ pytest.mark.smoke
+@ pytest.mark.sqcmds
+@ pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
+                                                                  '/tests/integration/sqcmds/nxos-samples')))
 def test_nxos_sqcmds(testvar, create_context_config):
     _test_sqcmds(testvar, create_context_config)
 
 
-@pytest.mark.smoke
-@pytest.mark.sqcmds
-@pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
-                        '/tests/integration/sqcmds/junos-samples')))
+@ pytest.mark.smoke
+@ pytest.mark.sqcmds
+@ pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
+                                                                  '/tests/integration/sqcmds/junos-samples')))
 def test_junos_sqcmds(testvar, create_context_config):
     _test_sqcmds(testvar, create_context_config)
 
 
-@pytest.mark.smoke
-@pytest.mark.sqcmds
-@pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
-                        '/tests/integration/sqcmds/eos-samples')))
+@ pytest.mark.smoke
+@ pytest.mark.sqcmds
+@ pytest.mark.parametrize("testvar", load_up_the_tests(os.scandir(os.path.abspath(os.curdir) +
+                                                                  '/tests/integration/sqcmds/eos-samples')))
 def test_eos_sqcmds(testvar, create_context_config):
     _test_sqcmds(testvar, create_context_config)

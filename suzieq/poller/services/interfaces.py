@@ -22,7 +22,6 @@ class InterfaceService(Service):
         """Clean up EOS interfaces output"""
 
         for entry in processed_data:
-            entry['origIfname'] = entry['ifname']
             entry["speed"] = int(entry["speed"] / 1000000)
             ts = entry["statusChangeTimestamp"]
             if ts:
@@ -100,7 +99,6 @@ class InterfaceService(Service):
                 entry['type'] = 'ethernet'
             if ifname not in new_data_dict:
 
-                entry['origIfname'] = entry['ifname']
                 if not entry['linkUpCnt']:
                     entry['linkUpCnt'] = 0
                 if not entry['linkDownCnt']:
@@ -167,21 +165,9 @@ class InterfaceService(Service):
             if entry['type']:
                 entry['type'] = entry['type'].lower()
 
-            if (entry['statusChangeTimestamp'] == 'Never' or
-                    entry['statusChangeTimestamp'] is None):
-                entry['statusChangeTimestamp'] = 0
-                # artificial field for comparison with previous poll result
-                entry["statusChangeTimestamp1"] = 0
-            else:
-                ts_str = re.match(r'.*\((.+) ago\)$',
-                                  entry['statusChangeTimestamp'])
-                ts1_str = re.match(r'^[^(]*',
-                                   entry['statusChangeTimestamp'])
-                ts = get_timestamp_from_junos_time(
-                    ts_str.group(1), raw_data[0]['timestamp']/1000)
-                entry['statusChangeTimestamp'] = int(ts)
-                # artificial field for comparison with previous poll result
-                entry["statusChangeTimestamp1"] = ts1_str
+            ts = get_timestamp_from_junos_time(
+                entry['statusChangeTimestamp'], raw_data[0]['timestamp']/1000)
+            entry['statusChangeTimestamp'] = int(ts)
 
             if entry['speed']:
                 if entry['speed'].endswith('mbps'):
@@ -190,8 +176,6 @@ class InterfaceService(Service):
                     entry['speed'] = int(entry['speed'].split('Gb')[0])*1000
                 elif entry['speed'] == 'Unlimited':
                     entry['speed'] = 0
-
-            entry['ifname'] = entry['ifname'].replace('/', '-')
 
             if entry['master'] == 'Ethernet-Bridge':
                 entry['master'] = 'bridge'
@@ -238,7 +222,6 @@ class InterfaceService(Service):
                     continue
 
                 new_entry = {'ifname': ifname,
-                             'origIfname': ifname,
                              'mtu': entry['afi'][i][0].get(
                                  'mtu', [{'data': 0}])[0]['data'],
                              'type': 'logical',
@@ -274,7 +257,6 @@ class InterfaceService(Service):
                 new_entry['ip6AddressList'] = v6addresses
                 new_entry['ipAddressList'] = v4addresses
 
-                new_entry['ifname'] = new_entry['ifname'].replace('/', '-')
                 new_entries.append(new_entry)
 
             entry.pop('vlanName')
@@ -295,12 +277,9 @@ class InterfaceService(Service):
         unnum_intf_entry_idx = []  # backtrack to interface to fix
 
         for entry_idx, entry in enumerate(processed_data):
-            entry['origIfname'] = entry['ifname']
             # artificial field for comparison with previous poll result
             entry["statusChangeTimestamp1"] = entry.get(
                 "statusChangeTimestamp", '')
-            if entry['type'] == 'eth':
-                entry['type'] = 'ethernet'
 
             if ('vrf' in entry and entry['vrf'] != 'default' and
                     entry['vrf'] not in created_if_list):
@@ -319,10 +298,11 @@ class InterfaceService(Service):
             else:
                 entry['master'] = ''
 
-            if entry['_portmode'] == 'access' or entry['_portmode'] == 'trunk':
+            portmode = entry.get('_portmode', '')
+            if portmode == 'access' or portmode == 'trunk':
                 entry['master'] = 'bridge'
                 add_bridge_intf = True
-                if entry['state'] == "up":
+                if entry.get('state', '') == "up":
                     bridge_intf_state = "up"
                 if entry.get('mtu', 1500) < bridge_mtu:
                     bridge_mtu = entry.get('mtu', 0)
@@ -356,7 +336,10 @@ class InterfaceService(Service):
             if isinstance(speed, str) and speed.startswith("unknown enum"):
                 entry['speed'] = 0
 
-            entry['type'] = entry['type'].lower()
+            entry['type'] = entry.get('type', '').lower()
+            if entry['type'] == 'eth':
+                entry['type'] = 'ethernet'
+
             if entry['ifname'].startswith('Vlan'):
                 entry['type'] = 'vlan'
             elif entry['ifname'].startswith('nve'):
@@ -369,12 +352,11 @@ class InterfaceService(Service):
                 entry['vlan'] = int(entry['ifname'].split('Vlan')[1])
 
             # have this at the end to avoid messing up processing
-            entry['ifname'] = entry['ifname'].replace('/', '-')
 
         # Fix unnumbered interface references
         for idx in unnum_intf_entry_idx:
             entry = processed_data[idx]
-            entry['ipAddressList'] = unnum_intf.get(entry['origIfname'], [])
+            entry['ipAddressList'] = unnum_intf.get(entry['ifname'], [])
 
         # Add bridge interface
         if add_bridge_intf:
@@ -401,7 +383,6 @@ class InterfaceService(Service):
                 entry['adminState'] = 'up'
             else:
                 entry['adminState'] = 'down'
-            entry['origIfname'] = entry['ifname']
             # Linux interface output has no status change timestamp
 
         return processed_data

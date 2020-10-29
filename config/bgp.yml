@@ -74,7 +74,7 @@ apply:
         "remoteAs: peerAsn",
         "localAs: asn",
         "lastResetDueTo: reason?|",
-        "lastNotificationReason: notifcnReason?|",
+        "lastNotificationReason: notificnReason?|",
         "lastResetTimerMsecs: lastDownTime?|0",
         "addressFamilyInfo/IPv4 Unicast/acceptedPrefixCounter: v4PfxRx?|0",
         "addressFamilyInfo/IPv6 Unicast/acceptedPrefixCounter: v6PfxRx?|0",
@@ -142,7 +142,7 @@ apply:
         "remoteAs: peerAsn",
         "localAs: asn",
         "lastResetDueTo: reason?|",
-        "lastNotificationReason: notifcnReason?|",
+        "lastNotificationReason: notificnReason?|",
         "lastResetTimerMsecs: lastDownTime?|0",
         "addressFamilyInfo/IPv4 Unicast/acceptedPrefixCounter: v4PfxRx?|0",
         "addressFamilyInfo/IPv6 Unicast/acceptedPrefixCounter: v6PfxRx?|0",
@@ -225,7 +225,7 @@ apply:
         "connsdropped: numChanges+numChanges",
         "elapsedtime: estdTime?|",
         "resetreason: reason",
-        "peerresetreason: "notifiCnReason?|",
+        "peerresetreason: "notificnReason?|",
         "TABLE_af/ROW_af/[*]?/TABLE_saf/ROW_saf/af-name: afiSafi",
         "TABLE_af/ROW_af/[*]?/TABLE_saf/ROW_saf/af-recvd: afRcvd",
         "TABLE_af/ROW_af/[*]?/TABLE_saf/ROW_saf/af-advertised: afAdvertised",
@@ -264,7 +264,7 @@ apply:
       - command: show bgp summary | display json
         normalize: 'bgp-information/bgp-peer/*/[
         "peer-address/[0]/data: peer",
-        "elapsed-time/[0]/data: estdTime",
+        "elapsed-time/[0]/attributes: estdTime?|",
         "vrf: vrf?|default",
         "entry_type: _entryType?|summary",
         ]'

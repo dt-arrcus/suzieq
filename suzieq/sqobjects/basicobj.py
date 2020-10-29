@@ -7,8 +7,8 @@ from suzieq.engines import get_sqengine
 
 class SqContext(object):
 
-    def __init__(self, engine):
-        self.cfg = load_sq_config(validate=False)
+    def __init__(self, engine, config_file=None):
+        self.cfg = load_sq_config(validate=False, config_file=config_file)
 
         self.schemas = Schema(self.cfg['schema-directory'])
 
@@ -31,21 +31,19 @@ class SqObject(object):
                  start_time: str = '', end_time: str = '',
                  view: str = 'latest', namespace: typing.List[str] = [],
                  columns: typing.List[str] = ['default'],
-                 context=None, table: str = '') -> None:
+                 context=None, table: str = '', config_file=None) -> None:
 
         if context is None:
-            self.ctxt = SqContext(engine_name)
+            self.ctxt = SqContext(engine_name, config_file)
         else:
             self.ctxt = context
             if not self.ctxt:
                 self.ctxt = SqContext(engine_name)
 
         self._cfg = self.ctxt.cfg
-        self._schemas = self.ctxt.schemas
+        self._schema = SchemaForTable(table, self.ctxt.schemas)
         self._table = table
-        self._sort_fields = []
-        self._cat_fields = []
-        self._ign_key_fields = []  # Used when keys != parquet partition cols
+        self._sort_fields = self._schema.key_fields()
 
         if not namespace and self.ctxt.namespace:
             self.namespace = self.ctxt.namespace
@@ -86,12 +84,24 @@ class SqObject(object):
         self._addnl_fields = []
 
     @property
-    def schemas(self):
+    def all_schemas(self):
         return self.ctxt.schemas
+
+    @property
+    def schema(self):
+        return self._schema
 
     @property
     def cfg(self):
         return self._cfg
+
+    @property
+    def table(self):
+        return self._table
+
+    def validate_input(self, **kwargs):
+        """Dummy validate input"""
+        return
 
     def get(self, **kwargs) -> pd.DataFrame:
         if not self._table:
@@ -103,8 +113,12 @@ class SqObject(object):
         if self._addnl_filter:
             kwargs['add_filter'] = self._addnl_filter
 
-        if self._ign_key_fields:
-            kwargs['ign_key'] = self._ign_key_fields
+        # This raises exceptions if it fails
+        try:
+            self.validate_input(**kwargs)
+        except Exception as error:
+            df = pd.DataFrame({'error': [f'{error}']})
+            return df
 
         return self.engine_obj.get(**kwargs)
 
@@ -142,7 +156,7 @@ class SqObject(object):
         else:
             columns = ["default"]
 
-        table_schema = SchemaForTable(self._table, self.schemas)
+        table_schema = SchemaForTable(self._table, self.all_schemas)
         columns = table_schema.get_display_fields(columns)
 
         if what not in columns:

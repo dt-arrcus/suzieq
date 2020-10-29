@@ -36,7 +36,17 @@ class ParquetOutputWorker(OutputWorker):
         if not os.path.isdir(cdir):
             os.makedirs(cdir)
 
+        # dtypes = {x: data['schema'].field(x).type.__str__()
+        #           if 'list' not in data['schema'].field(x).type.__str__()
+        #           else data['schema'].field(x).type.to_pandas_dtype()
+        #           for x in data['schema'].names}
+
         df = pd.DataFrame.from_dict(data["records"])
+        # df.to_parquet(
+        #     path=cdir,
+        #     partition_cols=data['partition_cols'],
+        #     index=True,
+        #     engine='pyarrow')
         # pq.write_metadata(
         #     self.schema,'{}/_metadata'.format(cdir),
         #     version='2.0',
@@ -48,8 +58,10 @@ class ParquetOutputWorker(OutputWorker):
         pq.write_to_dataset(
             table,
             root_path=cdir,
-            partition_cols=data["partition_cols"],
+            partition_cols=data['partition_cols'],
             version="2.0",
+            compression='ZSTD',
+            row_group_size=100000,
         )
 
 

@@ -34,7 +34,7 @@ class BgpObj(SqEngineObject):
         if df.empty:
             return df
 
-        sch = SchemaForTable(self.iobj._table, self.schemas)
+        sch = SchemaForTable(self.iobj.table, self.schemas)
         query_str = build_query_str([], sch, vrf=vrf, peer=peer,
                                     hostname=hostname)
         if 'peer' in df.columns:
@@ -163,8 +163,11 @@ class BgpObj(SqEngineObject):
             # I've not seen the diff between ignore_index and not and so
             # deliberately ignoring
             mdf = mestd_df.append(df[df.state != 'Established'])
-            mdf.fillna({'peerHostname': '', 'vrf_y': '', 'peer_y': '',
-                        'peerHost': '', 'asn_y': 0, 'peerAsn_y': 0},
+            # Pandas 1.1.1 insists on fill values being in category already
+            for i in mdf.select_dtypes(include='category'):
+                mdf[i].cat.add_categories('', inplace=True)
+            mdf.fillna(value={'peerHostname': '', 'vrf_y': '', 'peer_y': '',
+                              'peerHost': '', 'asn_y': 0, 'peerAsn_y': 0},
                        inplace=True)
 
             if 'peerHostname' in df.columns:
@@ -185,7 +188,7 @@ class BgpObj(SqEngineObject):
                        "peerAsn", "v4Enabled", "v6Enabled", "evpnEnabled",
                        "v4Advertised", "v6Advertised", "evpnAdvertised",
                        "v4Received", "v6Received", "evpnReceived", "bfdStatus",
-                       "reason", "notifcnReason", "peerIP", "updateSource"]
+                       "reason", "notificnReason", "peerIP", "updateSource"]
 
         kwargs.pop("columns", None)  # Loose whatever's passed
 
@@ -217,7 +220,7 @@ class BgpObj(SqEngineObject):
         # Get list of peer IP addresses for peer not in Established state
         # Returning to performing checks even if we didn't get LLDP/Intf info
         df['assertReason'] += df.apply(
-            lambda x: [f"{x['reason']}:{x['notifcnReason']}"]
+            lambda x: [f"{x['reason']}:{x['notificnReason']}"]
             if ((x['state'] != 'Established') and
                 (x['reason'] and x['reason'] != 'None' and
                  x['reason'] != "No error"))

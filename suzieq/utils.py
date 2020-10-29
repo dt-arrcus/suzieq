@@ -95,6 +95,7 @@ class Schema(object):
 
         schemas = {}
         phy_tables = {}
+        types = {}
 
         if not (schema_dir and os.path.exists(schema_dir)):
             logger.error(
@@ -109,11 +110,13 @@ class Schema(object):
                     data = json.loads(f.read())
                     table = data["name"]
                     schemas[table] = data["fields"]
+                    types[table] = data['type']
                     phy_tables[data["name"]] = data.get("physicalTable", table)
             break
 
         self._schema = schemas
         self._phy_tables = phy_tables
+        self._types = types
 
     def tables(self):
         return self._schema.keys()
@@ -129,6 +132,9 @@ class Schema(object):
             if f['name'] == field:
                 return f
 
+    def type_for_table(self, table):
+        return self._types[table]
+
     def key_fields_for_table(self, table):
         # return [f['name'] for f in self._schema[table] if f.get('key', None) is not None]
         return self._sort_fields_for_table(table, 'key')
@@ -143,7 +149,8 @@ class Schema(object):
             field = self.field_for_table(table, f_name)
             if field.get(tag, None) is not None:
                 field_weights[f_name] = field.get(tag, 1000)
-        return [k for k in sorted(field_weights.keys(), key=lambda x: field_weights[x])]
+        return [k for k in sorted(field_weights.keys(),
+                                  key=lambda x: field_weights[x])]
 
     def array_fields_for_table(self, table):
         fields = self.fields_for_table(table)
@@ -158,6 +165,11 @@ class Schema(object):
         """Return the name of the underlying physical table"""
         if self._phy_tables:
             return self._phy_tables.get(table, table)
+
+    def get_partition_columns_for_table(self, table):
+        """Return the list of partition columns for table"""
+        if self._phy_tables:
+            return self._sort_fields_for_table(table, 'partition')
 
     def get_arrow_schema(self, table):
         """Convert the internal AVRO schema into the equivalent PyArrow schema"""
@@ -210,7 +222,7 @@ class SchemaForTable(object):
             if isinstance(schema, Schema):
                 self._all_schemas = schema
             else:
-                raise ValueError(f"Passing non-Schema type for schema")
+                raise ValueError("Passing non-Schema type for schema")
         else:
             self._all_schemas = Schema(schema_dir=schema_dir)
         self._table = table
@@ -218,8 +230,23 @@ class SchemaForTable(object):
             raise ValueError(f"Unknown table {table}, no schema found for it")
 
     @property
+    def type(self):
+        return self._all_schemas.type_for_table(self._table)
+
+    @property
+    def version(self):
+        return self._all_schemas.field_for_table(self._table,
+                                                 'sqvers')['default']
+
+    @property
     def fields(self):
         return self._all_schemas.fields_for_table(self._table)
+
+    def get_phy_table(self):
+        return self._all_schemas.get_phy_table_for_table(self._table)
+
+    def get_partition_columns(self):
+        return self._all_schemas.get_partition_columns_for_table(self._table)
 
     def key_fields(self):
         return self._all_schemas.key_fields_for_table(self._table)
@@ -254,6 +281,9 @@ class SchemaForTable(object):
 
     def get_raw_schema(self):
         return self._all_schemas.get_raw_schema(self._table)
+
+    def get_arrow_schema(self):
+        return self._all_schemas.get_arrow_schema(self._table)
 
 
 def get_latest_files(folder, start="", end="", view="latest") -> list:
@@ -403,34 +433,29 @@ def get_timestamp_from_cisco_time(input, timestamp):
     return int((datetime.fromtimestamp(timestamp)-delta).timestamp()*1000)
 
 
-def get_timestamp_from_junos_time(input, timestamp):
+def get_timestamp_from_junos_time(input, timestamp: int):
     """Get timestamp in ms from the Junos-specific timestamp string
-    Examples of Cisco timestamp str are 00:00:23, 1d 09:24:36 etc
+    The expected input looks like: "attributes" : {"junos:seconds" : "0"}.
+    We don't check for format because we're assuming the input would be blank
+    if it wasn't the right format. The input can either be a dictionary or a
+    JSON string.
     """
 
-    days = 0
-    secs = 0
-    timestr = input
-
-    if 'y' in timestr:
-        years, timestr = input.split('w')
-        days += int(years)*365
-
-    if 'w' in timestr:
-        weeks, timestr = timestr.split('w')
-        days += int(weeks)*7
-
-    if 'd' in timestr:
-        d, timestr = timestr.split('d')
-        days += int(d)
-
-    hours, *rest = timestr.strip().split(':')
-    if len(rest) == 2:
-        mins, secs = rest
+    if not input:
+        # Happens for logical interfaces such as gr-0/0/0
+        secs = 0
     else:
-        mins = rest[0]
-    delta = relativedelta(days=days, hours=int(
-        hours), minutes=int(mins), seconds=int(secs))
+        try:
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input
+            secs = int(data.get('junos:seconds', 0))
+        except Exception:
+            logger.warning(f'Unable to convert junos secs from {input}')
+            secs = 0
+
+    delta = relativedelta(seconds=int(secs))
     return int((datetime.fromtimestamp(timestamp)-delta).timestamp()*1000)
 
 
@@ -496,10 +521,7 @@ def build_query_str(skip_fields: list, schema, **kwargs) -> str:
         if not v or f in skip_fields or f in ["groupby"]:
             continue
         type = schema.field(f).get('type', 'string')
-        if isinstance(v, str):
-            query_str += f'{prefix} {f}{build_query_str(v, type)} '
-            prefix = "and"
-        elif isinstance(v, list) and len(v):
+        if isinstance(v, list) and len(v):
             subq = ''
             subcond = ''
             for elem in v:
@@ -507,10 +529,13 @@ def build_query_str(skip_fields: list, schema, **kwargs) -> str:
                 subcond = 'or'
             query_str += '{} ({})'.format(prefix, subq)
             prefix = "and"
+        else:
+            query_str += f'{prefix} {f}{build_query_str(v, type)} '
+            prefix = "and"
 
     return query_str
 
 
 def known_devtypes() -> list:
     """Returns the list of known dev types"""
-    return(['cumulus', 'eos', 'junos-mx', 'junos-qfx', 'linux', 'nxos','sonic'])
+    return(['cumulus', 'eos', 'junos-mx', 'junos-qfx', 'linux', 'nxos', 'sonic'])

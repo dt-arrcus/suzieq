@@ -1,11 +1,15 @@
 import pandas as pd
 from importlib import import_module
 
-from suzieq.sqobjects import basicobj
+from suzieq.sqobjects.basicobj import SqObject
 from suzieq.utils import SchemaForTable
 
 
-class TablesObj(basicobj.SqObject):
+class TablesObj(SqObject):
+
+    def __init__(self, **kwargs):
+        # We're passing any table name to get init to work
+        super().__init__(table='device', **kwargs)
 
     def get(self, **kwargs):
         """Show the tables for which we have information"""
@@ -28,7 +32,9 @@ class TablesObj(basicobj.SqObject):
 
                 table_obj = eobj(self)
                 info = {'table': table}
-                info.update(table_obj.get_table_info(table, **kwargs))
+                info.update(table_obj.get_table_info(
+                    table, columns=['namespace', 'hostname', 'timestamp'],
+                    **kwargs))
                 tables[i] = info
 
             if unknown_tables:
@@ -40,9 +46,12 @@ class TablesObj(basicobj.SqObject):
             df = pd.DataFrame.from_dict(tables)
             df = df.sort_values(by=['table']).reset_index(drop=True)
             cols = df.columns
-            total = pd.DataFrame([['TOTAL',  df['first_time'].min(), df['latest_time'].max(),
+            total = pd.DataFrame([['TOTAL',  df['first_time'].min(),
+                                   df['latest_time'].max(),
                                    df['intervals'].max(),
-                                   df['all rows'].sum(), df['namespaces'].max(), df['devices'].max()]],
+                                   df['all rows'].sum(),
+                                   df['namespaces'].max(),
+                                   df['devices'].max()]],
                                  columns=cols)
             df = df.append(total, ignore_index=True).dropna()
         return df
@@ -51,8 +60,9 @@ class TablesObj(basicobj.SqObject):
         """Describes the fields for a given table"""
 
         table = kwargs.get('table', '')
+
         try:
-            sch = SchemaForTable(table, self.schemas)
+            sch = SchemaForTable(table, self.all_schemas)
         except ValueError:
             sch = None
         if not sch:
@@ -60,7 +70,8 @@ class TablesObj(basicobj.SqObject):
                 {'error': [f'ERROR: incorrect table name {table}']})
             return df
 
-        entries = [{'name': x['name'], 'type': x['type'], 'key': x.get('key', ''),
+        entries = [{'name': x['name'], 'type': x['type'],
+                    'key': x.get('key', ''),
                     'display': x.get('display', ''),
                     'description': x.get('description', '')}
                    for x in sch.get_raw_schema()]
